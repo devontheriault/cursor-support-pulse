@@ -34,7 +34,8 @@ FROM read_json(
             user_id BIGINT,
             staff BOOLEAN,
             accepted_answer BOOLEAN,
-            link_counts STRUCT(url VARCHAR)[]
+            link_counts STRUCT(url VARCHAR)[],
+            cooked VARCHAR
         )[])'
     }
 );
@@ -50,7 +51,8 @@ SELECT
     p.user_id,
     coalesce(p.staff, false)            AS is_staff,
     coalesce(p.accepted_answer, false)  AS is_accepted,
-    p.link_counts
+    p.link_counts,
+    CASE WHEN p.post_number = 1 THEN p.cooked END AS cooked
 FROM raw_topics AS t,
      unnest(t.post_stream.posts) AS u(p)
 WHERE p.post_type = 1;
@@ -92,6 +94,52 @@ GROUP BY id;
 -- which means docs), group 2 the page path without the query string or #anchor.
 SET VARIABLE docs_url =
     '^https?://(?:www\.)?(?:docs\.cursor\.com|cursor\.com(?:/[a-z]{2}(?:-[a-z]{2,4})?)?/(docs|help))(/[^?#]*)?(?:[?#].*)?$';
+
+
+-- The Cursor app version the reporter is on, as major.minor ('3.21'), from
+-- the first post. The Bug Reports template has a "Version Information"
+-- section; what people put there, checked by hand on real threads:
+--   * Cursor's About dialog, pasted: "Version: 3.21.4 (user setup)" then
+--     "VSCode Version: 1.105.1" / "Commit: ..." / "Electron: ..." lines.
+--   * Free text naming Cursor: "Cursor 3.23.23", "Cursor IDE 3.13.25",
+--     "Cursor: 3.25.9 (stable)", or the Windows installer's
+--     "3.18.9 (user setup)" / "(system setup)".
+--   * Other products' versions, which must not count: Grok Bot's own About
+--     dialog ("Version: 0.71.2" then "Built: ..."), the CLI
+--     ("Version: 2026.10.16-e3cb207"), @cursor/sdk 1.0.x, the iOS app,
+--     and "VSCode Version: 1.128.0", the editor base inside the IDE.
+--   * Bare numbers ("3.17.8" alone): left out. Usually the IDE, but nothing
+--     in the text says so, and Grok Bot and SDK reports look the same.
+-- So a version counts when it is an About-dialog "Version:" line (at a
+-- line start, so "VSCode Version:" never matches) with a VSCode, Commit
+-- or Electron line within the next few lines, or, inside the Version
+-- Information section, a version marked as Cursor's. HTML tags become line
+-- breaks first: the About paste arrives as <br>-separated lines or a code block.
+CREATE OR REPLACE TEMP TABLE app_versions AS
+WITH
+
+first_posts AS (
+    SELECT
+        thread_id,
+        regexp_replace(regexp_replace(cooked, '<br\s*/?>', chr(10), 'g'), '<[^>]+>', chr(10), 'g') AS body,
+        regexp_replace(
+            regexp_extract(cooked, '(?s)version-information[^>]*>.*?</h3>(.*?)(?:<h3|$)', 1),
+            '<[^>]+>', ' ', 'g')                     AS section
+    FROM posts
+    WHERE post_number = 1 AND cooked IS NOT NULL
+)
+
+SELECT
+    thread_id,
+    coalesce(
+        nullif(regexp_extract(body,
+            '(?m)^[ \t]*Version:[ \t]*v?(\d+\.\d+)\.\d+[^\n]*\n(?:[^\n]*\n){0,3}?[^\n]*(?:VS ?Code|Commit:|Electron:)', 1), ''),
+        nullif(regexp_extract(section,
+            '(?i)\bCursor(?:\s+(?:IDE|desktop|app))?(?:\s+version)?\s*:?\s*v?(\d+\.\d+)\.\d+', 1), ''),
+        nullif(regexp_extract(section,
+            '(?i)\b(\d+\.\d+)\.\d+\s*\((?:user|system) setup\)', 1), '')
+    )                                                AS app_version
+FROM first_posts;
 
 
 CREATE OR REPLACE TABLE threads AS
@@ -153,12 +201,14 @@ SELECT
     coalesce(ps.staff_posts, 0)                      AS staff_posts,
     coalesce(t.has_accepted_answer, false)
         OR coalesce(ps.any_accepted, false)          AS solved,
-    coalesce(d.doc_links, [])                        AS doc_links
+    coalesce(d.doc_links, [])                        AS doc_links,
+    v.app_version                                    -- '3.21', or NULL if the post names none
 FROM raw_topics AS t
 JOIN scope AS s USING (id)
 LEFT JOIN post_stats AS ps ON ps.thread_id = t.id
 LEFT JOIN doc_links  AS d  ON d.thread_id  = t.id
 LEFT JOIN labels     AS l  ON l.id         = t.id
+LEFT JOIN app_versions AS v ON v.thread_id = t.id
 WHERE s.in_category
   AND s.in_window
   AND NOT s.is_pinned

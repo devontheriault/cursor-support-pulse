@@ -1,6 +1,6 @@
 """Build the analysis: raw/ + out/labels.json -> out/top_issues.json + data.js.
 
-Runs sql/01..05 in DuckDB over the crawled JSON, then writes:
+Runs sql/01..07 in DuckDB over the crawled JSON (and raw/status/ from status.py), then writes:
   out/top_issues.json  the top 10 with sample titles (input to label.py docs)
   data.js              the ES module the page imports (shape in CONTRACT.md)
 
@@ -13,6 +13,7 @@ Safe to run before out/doc_matches.json exists: doc status is then 'unknown'.
 
 import argparse
 import json
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -20,7 +21,7 @@ from pathlib import Path
 import duckdb
 
 ROOT = Path(__file__).resolve().parent
-SQL_STEPS = ["01_threads", "02_issues", "03_scores", "04_docs", "05_launches"]
+SQL_STEPS = ["01_threads", "02_issues", "03_scores", "04_docs", "05_launches", "06_incidents", "07_versions"]
 WINDOW_DAYS = 90
 FORUM = "https://forum.cursor.com/t/"
 REPO = "https://github.com/devontheriault/cursor-support-pulse"
@@ -53,12 +54,15 @@ def main() -> None:
     }.items():
         con.execute(f"SET VARIABLE {name} = ?", [value])
 
+    load_status_incidents(con, raw / "status")
     for step in SQL_STEPS:
         con.execute((ROOT / "sql" / f"{step}.sql").read_text())
 
     issues = top_issues(con)
     launches = rows(con, "SELECT tag, label, first_seen::VARCHAR AS first_seen, weeks FROM launches")
     trend = trend_data(con)
+    incidents = incidents_data(con)
+    versions = versions_data(con)
     totals = rows(con, """
         SELECT
             count(*)                                   AS threads,
@@ -93,9 +97,10 @@ def main() -> None:
     ) + "\n")
 
     args.out_js.parent.mkdir(parents=True, exist_ok=True)
-    args.out_js.write_text(render_js(meta, header, issues, launches, trend))
+    args.out_js.write_text(render_js(meta, header, issues, launches, trend, incidents, versions))
 
-    print_summary(con, meta, header, totals, issues, launches, trend, doc_matches_path, args.out_js)
+    print_summary(con, meta, header, totals, issues, launches, trend, incidents, versions,
+                  doc_matches_path, args.out_js)
 
 
 def parse_args() -> argparse.Namespace:
@@ -148,6 +153,52 @@ def resolve_window(crawl: dict) -> tuple[datetime, datetime, str, str]:
     return window_from, window_to, window_from.date().isoformat(), window_to.date().isoformat()
 
 
+MONTHS = {m: i for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June", "July",
+     "August", "September", "October", "November", "December"], 1)}
+
+
+def load_status_incidents(con: duckdb.DuckDBPyConnection, status: Path) -> None:
+    """raw/status/ (status.py) -> table status_incidents, read by sql/06_incidents.sql.
+
+    The history pages list every incident; raw/status/incidents/{code}.json
+    adds exact times. An incident without its own file falls back to the
+    history page's "Oct <var>21</var>, <var>17:40</var> - ..." string (the year
+    comes from its month block). No raw/status/ at all (sample/) gives an
+    empty table, and INCIDENTS reads zero.
+    """
+    con.execute("""
+        CREATE OR REPLACE TABLE status_incidents (
+            code VARCHAR, name VARCHAR, impact VARCHAR, is_maintenance BOOLEAN,
+            started_at TIMESTAMP, resolved_at TIMESTAMP, exact BOOLEAN)
+    """)
+    found = {}
+    for page in sorted(status.glob("history_p*.json")):
+        for month in json.loads(page.read_text()).get("months", []):
+            for inc in month.get("incidents", []):
+                found.setdefault(inc["code"], (month, inc))
+
+    def ts(value: str | None) -> datetime | None:
+        return datetime.fromisoformat(value).astimezone(timezone.utc).replace(tzinfo=None) if value else None
+
+    rows_ = []
+    for code, (month, inc) in found.items():
+        detail = status / "incidents" / f"{code}.json"
+        if detail.exists():
+            d = json.loads(detail.read_text())
+            rows_.append((code, d["name"], d["impact"], bool(d.get("scheduled_for")),
+                          ts(d["created_at"]), ts(d.get("resolved_at")), True))
+            continue
+        text = re.sub(r"<[^>]+>", "", inc["timestamp"])
+        m = re.match(r"(\w{3}) (\d+), (\d+):(\d+)", text)
+        if not m:
+            continue
+        start = datetime(month["year"], datetime.strptime(m[1], "%b").month, int(m[2]), int(m[3]), int(m[4]))
+        rows_.append((code, inc["name"], inc["impact"], inc["impact"] == "maintenance", start, None, False))
+    if rows_:
+        con.executemany("INSERT INTO status_incidents VALUES (?, ?, ?, ?, ?, ?, ?)", rows_)
+
+
 def top_issues(con: duckdb.DuckDBPyConnection) -> list[dict]:
     return rows(con, """
         SELECT
@@ -176,6 +227,43 @@ def trend_data(con: duckdb.DuckDBPyConnection) -> dict:
     }
 
 
+def incidents_data(con: duckdb.DuckDBPyConnection) -> dict:
+    """INCIDENTS in the contract's shape."""
+    s = rows(con, "SELECT * FROM incident_summary")[0]
+    pick = rows(con, "SELECT * FROM incident_effect WHERE lift_rank = 1")
+    issue = None
+    if pick:
+        p = pick[0]
+        issue = {"issue": p["issue"], "rank": p["rank"], "during": p["during"],
+                 "baseline": round(p["baseline"]), "threads": p["threads"], "share": r2(p["share"])}
+    return {
+        "count": s["count"],
+        "byImpact": {"minor": s["minor"], "major": s["major"], "critical": s["critical"]},
+        "hours": s["hours"],
+        "all": {"during": s["all_during"], "baseline": round(s["all_baseline"])},
+        "issue": issue,
+    }
+
+
+def versions_data(con: duckdb.DuckDBPyConnection) -> dict:
+    """VERSIONS in the contract's shape."""
+    s = rows(con, "SELECT * FROM version_summary")[0]
+    vs = rows(con, """
+        SELECT version, first_seen::DATE::VARCHAR AS first_seen, week1, total, top_issue, top_issue_week1
+        FROM versions ORDER BY first_seen
+    """)
+    median = s["median"]
+    return {
+        "threads": s["threads"],
+        "covered": s["covered"],
+        "median": None if median is None else (int(median) if float(median).is_integer() else round(median, 1)),
+        "worst": s["worst"],
+        "versions": [{"version": v["version"], "firstSeen": v["first_seen"], "week1": v["week1"],
+                      "total": v["total"], "topIssue": v["top_issue"], "topIssueWeek1": v["top_issue_week1"]}
+                     for v in vs],
+    }
+
+
 def rows(con: duckdb.DuckDBPyConnection, sql: str) -> list[dict]:
     cur = con.execute(sql)
     names = [c[0] for c in cur.description]
@@ -188,7 +276,8 @@ def r2(x: float | None) -> float | None:
 
 # --- data.js ---------------------------------------------------------------
 
-def render_js(meta: dict, header: dict, issues: list[dict], launches: list[dict], trend: dict) -> str:
+def render_js(meta: dict, header: dict, issues: list[dict], launches: list[dict], trend: dict,
+              incidents: dict, versions: dict) -> str:
     issue_objs = [{
         "rank": i["rank"],
         "issue": i["issue"],
@@ -234,6 +323,27 @@ def render_js(meta: dict, header: dict, issues: list[dict], launches: list[dict]
         "  ],",
         f"  launch: {js(trend['launch'])},",
         "};",
+        "// Status-page incidents (status.cursor.com) inside the window. A thread is \"during\" an incident if it opened in the",
+        "// 6 h after any incident started (overlapping windows counted once). baseline = the same windows shifted back 7 and 14 days",
+        "// (only shifts that land inside the window), averaged: what a normal week has in the same hours.",
+        "export const INCIDENTS = {",
+        f"  count: {incidents['count']}, byImpact: {js(incidents['byImpact'])}, hours: {incidents['hours']},",
+        f"  all: {js(incidents['all'])},",
+        f"  issue: {js(incidents['issue'])},",
+        "  // issue = the top-10 issue with the highest during/baseline (during ≥ 15). share = during / threads.",
+        "};",
+        "// App versions named in bug reports (\"Version: 3.21.4\" → '3.21'). firstSeen = earliest thread naming it (beta users",
+        "// make it a little early). week1 = threads naming it in the 7 days from firstSeen. Kept: first seen ≥ 7 days after the",
+        "// window opens (so it's a new update, not one already out) with a complete week 1 inside the window, ≥ 15 threads total.",
+        "// Oldest first. topIssue = most common issue (not Other) among its week-1 threads.",
+        "export const VERSIONS = {",
+        f"  threads: {versions['threads']}, covered: {versions['covered']},",
+        f"  median: {js(versions['median'])},",
+        f"  worst: {js(versions['worst'])},",
+        "  versions: [",
+        *(f"    {js(v)}," for v in versions["versions"]),
+        "  ],",
+        "};",
     ]
     return "\n".join(lines) + "\n"
 
@@ -261,7 +371,8 @@ def js(value) -> str:
 
 # --- stdout ----------------------------------------------------------------
 
-def print_summary(con, meta, header, totals, issues, launches, trend, doc_matches_path, out_js) -> None:
+def print_summary(con, meta, header, totals, issues, launches, trend, incidents, versions,
+                  doc_matches_path, out_js) -> None:
     funnel = rows(con, """
         SELECT
             count(*)                                                    AS topic_files,
@@ -301,6 +412,8 @@ def print_summary(con, meta, header, totals, issues, launches, trend, doc_matche
         print(f"  {l['label']:<24} {l['tag']:<20} {l['first_seen']:<10}  {l['weeks']}")
 
     print_trend(trend)
+    print_incidents(con, incidents)
+    print_versions(versions)
 
     unknown = sum(i["doc_status"] == "unknown" for i in issues)
     if unknown:
@@ -319,6 +432,36 @@ def print_trend(trend: dict) -> None:
         print(f"  {week:<10}  {a:>9}  {b:>5}  {total:>5}  {share:>5}")
     a, b = sum(ours["threads"]), sum(rest["threads"])
     print(f"  {'all':<10}  {a:>9}  {b:>5}  {a + b:>5}  {a / (a + b):>5.0%}" if a + b else "  (no full weeks)")
+
+
+def print_incidents(con, incidents: dict) -> None:
+    s = rows(con, "SELECT * FROM incident_summary")[0]
+    i, a = incidents["byImpact"], incidents["all"]
+    print(f"\nIncidents: {incidents['count']} on the status page ({i['minor']} minor, {i['major']} major, "
+          f"{i['critical']} critical" + (f", {s['other_impact']} other" if s["other_impact"] else "")
+          + f"); {incidents['hours']} h windows, {s['window_hours'] or 0:.0f} h once merged")
+    inexact = con.execute("SELECT count(*) FROM incidents WHERE resolved_at IS NULL").fetchone()[0]
+    if inexact:
+        print(f"  {inexact} incidents have no incidents/{{code}}.json: start parsed from the history page (run status.py)")
+    print(f"  all threads: {a['during']} during vs {a['baseline']} baseline")
+    print(f"  {'#':>2}  {'issue':<34}  {'threads':>7}  {'during':>6}  {'base':>5}  {'lift':>5}  {'share':>5}")
+    for e in rows(con, "SELECT * FROM incident_effect ORDER BY rank"):
+        lift = f"{e['lift']:.2f}" if e["lift"] is not None else "-"
+        mark = "  <- INCIDENTS.issue" if e["lift_rank"] == 1 else ""
+        print(f"  {e['rank']:>2}  {e['issue'][:34]:<34}  {e['threads']:>7}  {e['during']:>6}  "
+              f"{e['baseline']:>5.1f}  {lift:>5}  {e['share']:>5.0%}{mark}")
+
+
+def print_versions(versions: dict) -> None:
+    v = versions
+    cov = f"{v['covered'] / v['threads']:.0%}" if v["threads"] else "-"
+    print(f"\nVersions: {v['covered']} of {v['threads']} threads name an app version ({cov}); "
+          f"worst {v['worst']}, median week 1 (others) {v['median']}")
+    print(f"  {'version':<8}  {'first':<10}  {'week1':>5}  {'total':>5}  top issue in week 1")
+    for x in v["versions"]:
+        mark = " *" if x["version"] == v["worst"] else "  "
+        print(f"{mark}{x['version']:<8}  {x['firstSeen']:<10}  {x['week1']:>5}  {x['total']:>5}  "
+              f"{x['topIssueWeek1'] or 0:>3}  {x['topIssue'] or '-'}")
 
 
 if __name__ == "__main__":
