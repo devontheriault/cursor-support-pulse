@@ -2,3 +2,4 @@ raw/
 out/
 .venv/
 __pycache__/
+sample/

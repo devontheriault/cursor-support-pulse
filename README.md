@@ -40,4 +40,4 @@ Python 3 with `duckdb` in `.venv`; labeling calls Claude through the Claude Code
 .venv/bin/python build.py           # again, now with doc status
 ```
 
-`build.py --raw sample --out-js /tmp/data.js` runs against the small sample in `sample/` (it needs an `out/labels.json` covering those threads).
+`build.py --raw sample --out-js /tmp/data.js` runs against a small crawl in `sample/` (it needs an `out/labels.json` covering those threads). `sample/` isn't in the repo because raw threads hold post text and usernames.
