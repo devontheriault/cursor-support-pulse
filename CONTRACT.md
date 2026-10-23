@@ -43,3 +43,18 @@ export const LAUNCHES = [
 ];
 ```
 Dates are ISO strings; the page formats them ("Oct 12").
+
+## Oct 23 changes
+- `data.js` gains `TREND` (card 3 is now "how one launch's load grew", replacing `LAUNCHES`, which stays exported for now):
+```js
+// Weekly thread counts across the whole window, full Mon–Sun weeks only (ISO date of each Monday).
+export const TREND = {
+  weeks: ['2026-07-27', '2026-08-03', ...],
+  series: [
+    { key: 'grok-bot', label: 'Grok Bot', threads: [0, 0, 43, ...] },      // the launch being tracked
+    { key: 'rest', label: 'Everything else', threads: [180, 175, ...] },
+  ],
+  launch: { key: 'grok-bot', label: 'Grok Bot', date: '2026-08-11', source: 'Cursor changelog', url: 'https://cursor.com/changelog/...' },
+};
+```
+- Final runs of `build.py` (writing the site's `data.js`) and `label.py docs` are done by the coordinator once every part is finished; while working, write to temp paths (`--out-js /tmp/…`, `--out /tmp/…`).
