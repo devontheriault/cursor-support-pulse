@@ -59,3 +59,42 @@ export const TREND = {
 ```
 - TREND rules (`sql/05_launches.sql`, part 2): same scope as `threads`. A Grok Bot thread is tagged `grok-bot`, or untagged with "Grok Bot"/"Grokbot" in the title. The `grok` tag is the Grok *models* inside Cursor's agent, a different product: it counts as "Everything else". Weeks are Mon–Sun in UTC, from the first Monday on or after `window_from` to the last Sunday before `window_to`; partial weeks at either end are dropped. The launch date and source are set in the SQL (`trend_launch`): Cursor's changelog has no Grok Bot entry, so the source is the Announcements post (Aug 11, 2026, 19:34 UTC, "early beta").
 - Final runs of `build.py` (writing the site's `data.js`) and `label.py docs` are done by the coordinator once every part is finished; while working, write to temp paths (`--out-js /tmp/…`, `--out /tmp/…`).
+
+## Oct 23 (later): outages and app updates
+Diagnosis (scratch, `/tmp/cx/an.py`): status incidents don't raise total volume, but "Model request fails with an error" (#6) runs ~2× inside them; changelog releases show no effect (dropped); the app version in the bug template is the real release signal (3.21 spiked). Two new inputs, two new exports.
+
+### Inputs
+- `raw/status/history_p{N}.json`: `https://status.cursor.com/history.json?page=N` (3 months a page, newest first; stop once a page's oldest month is before the window). If `https://status.cursor.com/incidents/{code}.json` gives exact `created_at`/`resolved_at`, cache those as `raw/status/incidents/{code}.json` and prefer them over parsing the `timestamp` string (`"Oct <var>21</var>, <var>17:40</var> - <var>17:53</var> UTC"`, year from the month block). Same crawl manners as the forum.
+- App version: the first post's `cooked` HTML, bug-report template line `Version: 3.21.4` (tags may wrap it). Keep major.minor (`3.21`). Add `cooked` for the first post (or just the parsed `app_version` column) to `threads` in `01_threads.sql`.
+
+### data.js additions
+```js
+// Status-page incidents (status.cursor.com) inside the window. A thread is "during" an incident if it opened in the
+// 6 h after any incident started (overlapping windows counted once). baseline = the same windows shifted back 7 and 14 days
+// (only shifts that land inside the window), averaged: what a normal week has in the same hours.
+export const INCIDENTS = {
+  count: 88, byImpact: { minor: 66, major: 18, critical: 4 }, hours: 6,
+  all: { during: 760, baseline: 790 },            // every in-scope thread
+  issue: { issue: 'Model request fails with an error', rank: 6, during: 41, baseline: 19, threads: 112, share: 0.37 },
+  // issue = the top-10 issue with the highest during/baseline (during ≥ 15). share = during / threads.
+};
+// App versions named in bug reports ("Version: 3.21.4" → '3.21'). firstSeen = earliest thread naming it (beta users
+// make it a little early). week1 = threads naming it in the 7 days from firstSeen. Kept: first seen ≥ 7 days after the
+// window opens (so it's a new update, not one already out) with a complete week 1 inside the window, ≥ 15 threads total.
+// Oldest first. topIssue = most common issue (not Other) among its week-1 threads.
+export const VERSIONS = {
+  threads: 3046, covered: 1105,                   // in-scope threads, and how many name a version
+  median: 46,                                     // median week1 across kept versions, excluding the worst
+  worst: '3.21',                                  // highest week1
+  versions: [
+    { version: '3.14', firstSeen: '2026-07-29', week1: 44, total: 84, topIssue: 'Interface elements missing or misdrawn', topIssueWeek1: 9 },
+  ],
+};
+```
+- `sql/06_incidents.sql`, `sql/07_versions.sql`, read by `build.py`; `print_summary` prints both. README gets a method paragraph and caveats for each.
+
+### Page
+- Card 2: the row for `INCIDENTS.issue` gets one line: "[share]% of these arrive during an outage: a status-page link in the error message would answer them." Nothing else on Card 2 changes.
+- Card 4 (new, after Card 3), "Which updates broke things?": one bar per version (oldest left), week-1 threads, `worst` highlighted, a median line. Headline: "Update [worst] drew [week1] posts in its first week, [x]× a typical update; [topIssueWeek1] were '[topIssue]'. Test for that before an update ships, and brief support the day it does."
+- Keep in mind: only [covered/threads]% of posts name an update; first seen is slightly early (beta users); outages barely change total posting ([all.during] vs [all.baseline]), people check the status page instead.
+- Method page (`cursor/method/`) gets the same two method notes.
