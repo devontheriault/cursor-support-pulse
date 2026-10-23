@@ -10,7 +10,7 @@ until $py -c 'import json,sys; sys.exit(0 if json.load(open("raw/crawl.json")).g
 done
 echo "crawl finished: $(date)"
 $py label.py issues
-$py label.py assign
+$py label.py assign --think
 $py build.py
 $py label.py docs
 $py build.py

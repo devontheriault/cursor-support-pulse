@@ -28,7 +28,7 @@ Python 3 with `duckdb` in `.venv`; labeling calls Claude through the Claude Code
 .venv/bin/python crawl.py           # forum -> raw/ (slow and polite: hours)
 .venv/bin/python label.py issues    # propose issues -> out/issues_proposed.json
 #   review and edit out/issues.json by hand (keep "Other")
-.venv/bin/python label.py assign    # one issue + sentiment per thread -> out/labels.json
+.venv/bin/python label.py assign --think  # one issue + sentiment per thread -> out/labels.json
 .venv/bin/python build.py           # SQL -> out/top_issues.json + data.js
 .venv/bin/python label.py docs      # match top issues to docs pages -> out/doc_matches.json
 .venv/bin/python build.py           # again, now with doc status

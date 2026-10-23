@@ -5,7 +5,9 @@ Usage: .venv/bin/python label.py [--raw DIR] issues|assign|docs|spot
   issues  pass 1: propose ~30 issue labels from a stratified sample of titles
           -> out/issues_proposed.json (and out/issues.json if it doesn't exist)
   assign  pass 2: one issue from out/issues.json + sentiment per in-scope thread
-          -> out/labels.json (resumable via out/labels.partial.jsonl)
+          -> out/labels.json (resumable via out/labels.partial.jsonl). Optional
+          out/issue_guide.json ({"<issue>": "what it covers"}) is shown to Haiku
+          with each label; --think turns extended thinking on (slower, more accurate)
   docs    best /docs page per issue in out/top_issues.json -> out/doc_matches.json
   spot    print random labeled threads for a human check
 
@@ -160,6 +162,7 @@ def load_threads(raw):
                 "category_id": t.get("category_id"),
                 "pinned": bool(t.get("pinned") or t.get("pinned_globally")),
                 "staff_op": bool(u and (u.get("admin") or u.get("moderator"))),
+                "tags": [g["name"] if isinstance(g, dict) else str(g) for g in t.get("tags") or []],
                 "source": "list",
             }
 
@@ -177,6 +180,7 @@ def load_threads(raw):
             "created_at": t.get("created_at") or rec.get("created_at"),
             "category_id": t.get("category_id", rec.get("category_id")),
             "pinned": bool(t.get("pinned") or t.get("pinned_globally")),
+            "tags": [g["name"] if isinstance(g, dict) else str(g) for g in t.get("tags") or []],
             "source": "topic",
         })
         if first:
@@ -274,6 +278,12 @@ def write_json(path, data):
     os.replace(tmp, path)
 
 
+def read_guide():
+    """Optional out/issue_guide.json: {"<issue>": "what it covers"}, shown to Haiku in assign and docs."""
+    path = os.path.join(OUT, "issue_guide.json")
+    return load_json(path) if os.path.exists(path) else {}
+
+
 def read_issues():
     path = os.path.join(OUT, "issues.json")
     if not os.path.exists(path):
@@ -344,23 +354,34 @@ def cmd_issues(args):
 
 # ---------------------------------------------------------------- assign (pass 2)
 
-ASSIGN_PROMPT = """Classify each Cursor support-forum thread below.
+ASSIGN_PROMPT = """Classify each Cursor support-forum thread below by the main problem its author reports or asks about.
 
-For each thread pick exactly one issue from this list, copied verbatim (use "Other" if none fits well):
+Issues (name: what it covers):
 {issues}
+- Other: posts with no problem to file (feature requests, off-topic, community or event posts, text too vague to tell); general how-to or "how does X work" questions that report nothing failing; or a problem none of the issues above covers. Questions about plans, pricing, usage, quotas or credits are never Other: they go to "Unclear plan, pricing or usage rules". A question that reports something not working goes to that problem's issue.
+
+Rules:
+- Pick exactly one issue per thread and copy its name verbatim.
+- Judge by the author's main problem, using the title first, then the text, category and tags.
+- When two issues fit, pick the more specific one: the feature that fails beats a general symptom.
+- Use "Other" only when no issue genuinely fits. A thread that fits an issue reasonably well gets that issue even if the match isn't perfect, but never force a thread into an issue that names a different problem.
 
 Also rate the author's sentiment from -1 (angry, blocked, losing money or work) through 0 (neutral question or report) to 1 (happy, grateful), as a number with one decimal.
 
 Reply with a JSON array, one object per thread, in the same order, every id included:
-[{{"id": 123, "issue": "<issue from the list>", "sentiment": -0.4}}]
+[{{"id": 123, "issue": "<issue name>", "sentiment": -0.4}}]
 
-Threads (JSON lines: id, title, text = start of the first post):
+Threads (JSON lines: id, category, tags, title, text = start of the first post):
 {threads}
 """
 
+CATEGORIES = {6: "Bug Reports", 8: "Help"}
 
-def issues_sha(issues):
-    return hashlib.sha256(json.dumps(issues).encode()).hexdigest()[:12]
+
+def issues_sha(issues, guide=None):
+    """Labels made with a different issue list, guide or prompt are stale."""
+    key = issues if not guide else [issues, guide, ASSIGN_PROMPT]
+    return hashlib.sha256(json.dumps(key).encode()).hexdigest()[:12]
 
 
 def read_partial(path, sha):
@@ -403,23 +424,28 @@ def normalise(rows, batch_ids, issues):
     return out, rejected
 
 
-def label_batch(batch, issues):
-    lines = "\n".join(json.dumps({"id": t["id"], "title": t["title"], "text": snippet(t)}, ensure_ascii=False)
+def label_batch(batch, issues, guide, think=False):
+    lines = "\n".join(json.dumps({"id": t["id"], "category": CATEGORIES.get(t.get("category_id"), "?"),
+                                  "tags": t.get("tags") or [], "title": t["title"], "text": snippet(t)},
+                                 ensure_ascii=False)
                       for t in batch)
-    prompt = ASSIGN_PROMPT.format(issues="\n".join(f"- {i}" for i in issues), threads=lines)
-    reply, secs = haiku(prompt, f"batch {batch[0]['id']}..{batch[-1]['id']}", think=False)
+    listed = "\n".join(f"- {i}: {guide[i]}" if guide.get(i) else f"- {i}" for i in issues if i != OTHER)
+    prompt = ASSIGN_PROMPT.format(issues=listed, threads=lines)
+    reply, secs = haiku(prompt, f"batch {batch[0]['id']}..{batch[-1]['id']}", think=think)
     rows, rejected = normalise(reply, {t["id"] for t in batch}, issues)
     return rows, rejected, secs
 
 
 def cmd_assign(args):
     issues = read_issues()
-    sha = issues_sha(issues)
+    guide = read_guide()
+    sha = issues_sha(issues, guide)
     threads = in_scope(args.raw)
     partial = os.path.join(OUT, "labels.partial.jsonl")
     done, stale = read_partial(partial, sha)
     if stale:
-        print(f"ignoring {stale} partial labels made with a different issues.json", file=sys.stderr)
+        print(f"ignoring {stale} partial labels made with a different issues.json, guide or prompt",
+              file=sys.stderr)
     scope_ids = {t["id"] for t in threads}
     timings, rejected_total = [], 0
 
@@ -434,7 +460,7 @@ def cmd_assign(args):
               file=sys.stderr)
         os.makedirs(OUT, exist_ok=True)
         with open(partial, "a") as f, concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
-            futs = {pool.submit(label_batch, b, issues): b for b in batches}
+            futs = {pool.submit(label_batch, b, issues, guide, args.think): b for b in batches}
             for n, fut in enumerate(concurrent.futures.as_completed(futs), 1):
                 b = futs[fut]
                 try:
@@ -474,7 +500,7 @@ def cmd_assign(args):
 
 DOCS_PROMPT = """A user-facing problem keeps coming up on Cursor's support forum:
 
-Issue: {issue}
+Issue: {issue}{covers}
 Example thread titles:
 {titles}
 
@@ -495,9 +521,10 @@ def sitemap_urls(raw):
     return sorted({u for u in urls if re.match(r"https://cursor\.com/(docs|help)/.+", u)})
 
 
-def match_doc(item, urls):
+def match_doc(item, urls, guide):
     titles = "\n".join(f"- {t}" for t in (item.get("sample_titles") or [])[:8]) or "- (none)"
-    prompt = DOCS_PROMPT.format(issue=item["issue"], titles=titles, urls="\n".join(urls))
+    covers = f"\nCovers: {guide[item['issue']]}" if guide.get(item["issue"]) else ""
+    prompt = DOCS_PROMPT.format(issue=item["issue"], covers=covers, titles=titles, urls="\n".join(urls))
     reply, secs = haiku(prompt, f"docs '{item['issue']}'")
     url = reply.get("url") if isinstance(reply, dict) else None
     reason = str(reply.get("reason", "")).strip() if isinstance(reply, dict) else ""
@@ -512,10 +539,11 @@ def match_doc(item, urls):
 def cmd_docs(args):
     top = load_json(os.path.join(OUT, "top_issues.json"))
     urls = sitemap_urls(args.raw)
+    guide = read_guide()
     print(f"matching {len(top)} issues against {len(urls)} /docs pages...", file=sys.stderr)
     matches, timings = {}, []
     with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
-        futs = {pool.submit(match_doc, item, urls): item for item in top if item.get("issue") != OTHER}
+        futs = {pool.submit(match_doc, item, urls, guide): item for item in top if item.get("issue") != OTHER}
         for fut in concurrent.futures.as_completed(futs):
             item = futs[fut]
             try:
@@ -552,8 +580,11 @@ def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--raw", default=argparse.SUPPRESS, help="input directory (default raw)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("issues", "assign", "docs"):
+    for name in ("issues", "docs"):
         sub.add_parser(name, parents=[common])
+    asp = sub.add_parser("assign", parents=[common])
+    asp.add_argument("--think", action="store_true",
+                     help="extended thinking on (about 6x slower per batch; default off)")
     sp = sub.add_parser("spot", parents=[common])
     sp.add_argument("-n", type=int, default=30)
     sp.add_argument("--seed", type=int, default=None)
