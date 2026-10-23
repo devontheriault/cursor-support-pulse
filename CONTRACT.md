@@ -98,3 +98,4 @@ export const VERSIONS = {
 - Card 4 (new, after Card 3), "Which updates broke things?": one bar per version (oldest left), week-1 threads, `worst` highlighted, a median line. Headline: "Update [worst] drew [week1] posts in its first week, [x]× a typical update; [topIssueWeek1] were '[topIssue]'. Test for that before an update ships, and brief support the day it does."
 - Keep in mind: only [covered/threads]% of posts name an update; first seen is slightly early (beta users); outages barely change total posting ([all.during] vs [all.baseline]), people check the status page instead.
 - Method page (`cursor/method/`) gets the same two method notes.
+- Oct 23: `INCIDENTS.launch = { key, label, incidents, threads, during, baseline, share }`: TREND's launch against its own outages (status component or name = its label), counted from the launch date; share = (during − baseline) / threads. Card 3's so what adds one sentence from it; the method page's outage note adds one.

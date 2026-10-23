@@ -35,7 +35,7 @@ SET VARIABLE incident_hours = 6;
 
 
 CREATE OR REPLACE TABLE incidents AS
-SELECT code, name, impact, started_at, resolved_at
+SELECT code, name, impact, started_at, resolved_at, components
 FROM status_incidents
 WHERE NOT is_maintenance
   AND started_at >= getvariable('window_from')
@@ -155,3 +155,93 @@ SELECT
     (SELECT count(*) FILTER (WHERE is_during) FROM incident_threads)        AS all_during,
     (SELECT coalesce(sum(baseline_weight), 0) FROM incident_threads)        AS all_baseline,
     (SELECT sum(epoch(w_end - w_start)) / 3600 FROM incident_windows)       AS window_hours;
+
+
+-- Part 2: the card 3 launch against its own outages -----------------------
+--
+-- Is the launch's lasting share (card 3) outages, or everyday use? Same
+-- method as above, narrowed to the launch: its incidents are the ones whose
+-- status component or name is the launch's label ("Grok Bot"), its threads
+-- are `trend_threads.is_launch` (05_launches.sql). Counting starts at the
+-- launch date instead of the window start, so the baseline never compares
+-- with weeks before the product existed: a moment needs a week of launch
+-- history behind it to count on either side.
+
+CREATE OR REPLACE TABLE launch_incident_windows AS
+WITH
+
+windows AS (
+    SELECT
+        i.started_at                                            AS w_start,
+        i.started_at + to_hours(getvariable('incident_hours'))  AS w_end
+    FROM incidents AS i, trend_launch AS l
+    WHERE list_contains(i.components, l.label)
+       OR i.name ILIKE '%' || l.label || '%'
+),
+
+flagged AS (
+    SELECT
+        w_start,
+        w_end,
+        coalesce(
+            w_start > max(w_end) OVER (ORDER BY w_start, w_end
+                                       ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+            true)                                               AS new_island
+    FROM windows
+),
+
+islands AS (
+    SELECT w_start, w_end, sum(new_island::INTEGER) OVER (ORDER BY w_start, w_end) AS island
+    FROM flagged
+)
+
+SELECT min(w_start) AS w_start, max(w_end) AS w_end, count(*) AS incidents
+FROM islands
+GROUP BY island;
+
+
+CREATE OR REPLACE TABLE launch_incident_threads AS
+WITH
+
+launch_threads AS (
+    SELECT t.id, t.created_at
+    FROM trend_threads AS t, trend_launch AS l
+    WHERE t.is_launch
+      AND t.created_at >= l.date
+),
+
+shifted AS (
+    SELECT t.id, s.shift_days, t.created_at + to_days(s.shift_days) AS shifted_at
+    FROM launch_threads AS t,
+         (VALUES (0), (7), (14)) AS s(shift_days),
+         trend_launch AS l
+    WHERE t.created_at + to_days(s.shift_days) >= l.date + INTERVAL 7 DAY
+),
+
+hits AS (
+    SELECT DISTINCT s.id, s.shift_days, s.shifted_at
+    FROM shifted AS s
+    JOIN launch_incident_windows AS w
+        ON s.shifted_at >= w.w_start
+       AND s.shifted_at <  w.w_end
+)
+
+SELECT
+    h.id,
+    h.shift_days = 0                                            AS is_during,
+    CASE
+        WHEN h.shift_days = 0 THEN 0
+        ELSE 1.0 / (1 + (h.shifted_at - INTERVAL 14 DAY >= l.date)::INTEGER)
+    END                                                         AS baseline_weight
+FROM hits AS h, trend_launch AS l;
+
+
+CREATE OR REPLACE TABLE launch_incident_summary AS
+SELECT
+    l.key,
+    l.label,
+    (SELECT coalesce(sum(incidents), 0) FROM launch_incident_windows)                AS incidents,
+    (SELECT count(*) FROM trend_threads AS t WHERE t.is_launch AND t.created_at >= l.date) AS threads,
+    (SELECT count(*) FILTER (WHERE is_during) FROM launch_incident_threads)          AS during,
+    (SELECT coalesce(sum(baseline_weight), 0) FROM launch_incident_threads)          AS baseline
+FROM trend_launch AS l;

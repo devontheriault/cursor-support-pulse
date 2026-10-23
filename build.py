@@ -170,7 +170,7 @@ def load_status_incidents(con: duckdb.DuckDBPyConnection, status: Path) -> None:
     con.execute("""
         CREATE OR REPLACE TABLE status_incidents (
             code VARCHAR, name VARCHAR, impact VARCHAR, is_maintenance BOOLEAN,
-            started_at TIMESTAMP, resolved_at TIMESTAMP, exact BOOLEAN)
+            started_at TIMESTAMP, resolved_at TIMESTAMP, exact BOOLEAN, components VARCHAR[])
     """)
     found = {}
     for page in sorted(status.glob("history_p*.json")):
@@ -187,16 +187,17 @@ def load_status_incidents(con: duckdb.DuckDBPyConnection, status: Path) -> None:
         if detail.exists():
             d = json.loads(detail.read_text())
             rows_.append((code, d["name"], d["impact"], bool(d.get("scheduled_for")),
-                          ts(d["created_at"]), ts(d.get("resolved_at")), True))
+                          ts(d["created_at"]), ts(d.get("resolved_at")), True,
+                          [c["name"] for c in d.get("components") or []]))
             continue
         text = re.sub(r"<[^>]+>", "", inc["timestamp"])
         m = re.match(r"(\w{3}) (\d+), (\d+):(\d+)", text)
         if not m:
             continue
         start = datetime(month["year"], datetime.strptime(m[1], "%b").month, int(m[2]), int(m[3]), int(m[4]))
-        rows_.append((code, inc["name"], inc["impact"], inc["impact"] == "maintenance", start, None, False))
+        rows_.append((code, inc["name"], inc["impact"], inc["impact"] == "maintenance", start, None, False, []))
     if rows_:
-        con.executemany("INSERT INTO status_incidents VALUES (?, ?, ?, ?, ?, ?, ?)", rows_)
+        con.executemany("INSERT INTO status_incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows_)
 
 
 def top_issues(con: duckdb.DuckDBPyConnection) -> list[dict]:
@@ -242,7 +243,18 @@ def incidents_data(con: duckdb.DuckDBPyConnection) -> dict:
         "hours": s["hours"],
         "all": {"during": s["all_during"], "baseline": round(s["all_baseline"])},
         "issue": issue,
+        "launch": launch_outages(con),
     }
+
+
+def launch_outages(con: duckdb.DuckDBPyConnection) -> dict | None:
+    """INCIDENTS.launch: the card 3 launch's own outages against its posts."""
+    s = rows(con, "SELECT * FROM launch_incident_summary")[0]
+    if not s["incidents"]:
+        return None
+    extra = max(s["during"] - s["baseline"], 0)
+    return {"key": s["key"], "label": s["label"], "incidents": s["incidents"], "threads": s["threads"],
+            "during": s["during"], "baseline": round(s["baseline"]), "share": r2(extra / s["threads"])}
 
 
 def versions_data(con: duckdb.DuckDBPyConnection) -> dict:
@@ -331,6 +343,9 @@ def render_js(meta: dict, header: dict, issues: list[dict], launches: list[dict]
         f"  all: {js(incidents['all'])},",
         f"  issue: {js(incidents['issue'])},",
         "  // issue = the top-10 issue with the highest during/baseline (during ≥ 15). share = during / threads.",
+        f"  launch: {js(incidents['launch'])},",
+        "  // launch = TREND's launch against its own outages (status component or name), counted from its launch date.",
+        "  // share = (during - baseline) / threads: the part of its posts outages add.",
         "};",
         "// App versions named in bug reports (\"Version: 3.21.4\" → '3.21'). firstSeen = earliest thread naming it (beta users",
         "// make it a little early). week1 = threads naming it in the 7 days from firstSeen. Kept: first seen ≥ 7 days after the",
