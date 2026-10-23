@@ -2,7 +2,8 @@
 -- Rank issues by four equally weighted parts, each min-max scaled to 0-1
 -- across every issue except Other (the catch-all is never ranked):
 --   frequency   threads                  how often it comes up
---   breadth     users + likes            how many people it reaches
+--   breadth     distinct users           how many people it reaches (likes left
+--                                        out: one viral thread can hold most of an issue's likes)
 --   staffCost   staff posts              how much staff time it takes
 --   negativity  -(average sentiment)     how frustrated people are
 -- score = the mean of the four parts.
@@ -16,7 +17,7 @@ parts AS (
         issue,
         threads,
         threads                  AS frequency,
-        users + likes            AS breadth,
+        users                    AS breadth,
         staff_posts              AS staff_cost,
         -coalesce(sentiment, 0)  AS negativity     -- unlabeled sentiment reads as neutral
     FROM issues

@@ -1,0 +1,46 @@
+{
+  "Grok Bot stops responding or can't connect": {
+    "url": "https://cursor.com/help/grok-bot/computer-recovery",
+    "reason": "Verified by hand: covers Reconnecting / Can't Reach, what to try first, and why a bot fails to respond."
+  },
+  "Agent hangs or times out": {
+    "url": "https://cursor.com/help/troubleshooting/network",
+    "reason": "Verified by hand: staff's usual fix for stuck agents (network diagnostics, HTTP/1.1 mode) lives here; agent-issues only covers the 'Agent Execution Timed Out' startup error."
+  },
+  "Cursor is slow, crashes or hogs resources": {
+    "url": "https://cursor.com/help/troubleshooting/performance",
+    "reason": "Verified by hand: covers high CPU or memory and input lag (extensions, .cursorignore); thin on crashes, which only install-issues touches."
+  },
+  "MCP server won't connect or load tools": {
+    "url": "https://cursor.com/docs/mcp",
+    "reason": "Verified by hand: covers mcp.json setup, OAuth and authentication, and an FAQ on debugging and crashed or timed-out servers."
+  },
+  "Grok Bot's computer won't reset or recover": {
+    "url": "https://cursor.com/help/grok-bot/computer-recovery",
+    "reason": "Verified by hand: explains Update, Recover and Reset, how long to wait, retrying once, and when to contact support."
+  },
+  "Agent runs on the wrong model": {
+    "url": "https://cursor.com/docs/subagents",
+    "reason": "Verified by hand: sub-agents are the largest share; 'Model configuration' explains when the chosen model isn't used. Staff's most-linked page here."
+  },
+  "Model request fails with an error": {
+    "url": null,
+    "reason": "Verified by hand: no page explains 'high demand', provider or 'unexpected error' messages; staff ask for a Request ID instead. Cursor Router page is about routing modes."
+  },
+  "Interface elements missing or misdrawn": {
+    "url": null,
+    "reason": "Verified by hand: these are interface bugs, not how-to gaps; the Agents Window page only describes features, so no page would fix them."
+  },
+  "Cloud agent fails or won't start": {
+    "url": "https://cursor.com/docs/cloud-agent/setup",
+    "reason": "Verified by hand: covers environment setup, install scripts, secrets and environment recovery; less help for runs that die mid-task."
+  },
+  "Usage numbers or limits shown wrong": {
+    "url": "https://cursor.com/help/models-and-usage/usage-limits",
+    "reason": "Verified by hand: explains checking usage, limits and reset dates. (Status is 'linked': staff link a docs page in 22% of threads.)"
+  },
+  "Automation, routine or Bugbot doesn't run": {
+    "url": null,
+    "reason": "Hand-checked Oct 23: help/ai-features/automations explains setup, triggers and billing but nothing about an automation, routine or Bugbot that fails to run."
+  }
+}
