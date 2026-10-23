@@ -230,7 +230,7 @@ def trend_data(con: duckdb.DuckDBPyConnection) -> dict:
 def incidents_data(con: duckdb.DuckDBPyConnection) -> dict:
     """INCIDENTS in the contract's shape."""
     s = rows(con, "SELECT * FROM incident_summary")[0]
-    pick = rows(con, "SELECT * FROM incident_effect WHERE lift_rank = 1")
+    pick = rows(con, "SELECT * FROM incident_effect WHERE lift_rank = 1 AND during >= 15")
     issue = None
     if pick:
         p = pick[0]

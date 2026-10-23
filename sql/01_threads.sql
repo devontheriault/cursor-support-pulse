@@ -101,45 +101,93 @@ SET VARIABLE docs_url =
 -- section; what people put there, checked by hand on real threads:
 --   * Cursor's About dialog, pasted: "Version: 3.21.4 (user setup)" then
 --     "VSCode Version: 1.105.1" / "Commit: ..." / "Electron: ..." lines.
---   * Free text naming Cursor: "Cursor 3.23.23", "Cursor IDE 3.13.25",
---     "Cursor: 3.25.9 (stable)", or the Windows installer's
---     "3.18.9 (user setup)" / "(system setup)".
+--   * Free text marking it as Cursor's: "Cursor 3.23.23", "Cursor IDE
+--     3.13.25", "Cursor Mac Desktop: 3.20.21", "cursor-server 3.22.12",
+--     "IDE: 3.18.9", a "Version: 3.14.7 · OS: macOS" line, or a build
+--     suffix: "3.18.9 (user setup)", "(system setup)", "(Universal)",
+--     "(ARM64)", "(commit ae3a2b7)".
 --   * Other products' versions, which must not count: Grok Bot's own About
 --     dialog ("Version: 0.71.2" then "Built: ..."), the CLI
---     ("Version: 2026.10.16-e3cb207"), @cursor/sdk 1.0.x, the iOS app,
---     and "VSCode Version: 1.128.0", the editor base inside the IDE.
+--     ("Version: 2026.10.16-e3cb207"), @cursor/sdk 1.0.x, the iOS app, and
+--     "VSCode Version: 1.128.0", the editor base inside the IDE.
 --   * Bare numbers ("3.17.8" alone): left out. Usually the IDE, but nothing
 --     in the text says so, and Grok Bot and SDK reports look the same.
--- So a version counts when it is an About-dialog "Version:" line (at a
--- line start, so "VSCode Version:" never matches) with a VSCode, Commit
--- or Electron line within the next few lines, or, inside the Version
--- Information section, a version marked as Cursor's. HTML tags become line
--- breaks first: the About paste arrives as <br>-separated lines or a code block.
+-- So a version counts when it is
+--   1. an About-dialog "Version:" line (at a line start, so "VSCode
+--      Version:" never matches) with a VSCode, Commit or Electron line within
+--      the next few lines, anywhere in the post; or
+--   2. inside the Version Information section, a version named as Cursor's
+--      ("Cursor ... 3.20.21", not "Cursor iOS/CLI ..."); or
+--   3. inside that section, a version with a desktop build suffix; or
+--   4. inside that section, a "Version:"/"IDE:" line, unless the section
+--      names another product (Grok, CLI, SDK, iOS, Android, JetBrains, or
+--      Grok Bot's "Built:" and "Release Track:" lines).
+-- The About paste arrives as <br>-separated lines or a code block, so
+-- structure is read line by line.
 CREATE OR REPLACE TEMP TABLE app_versions AS
 WITH
+
+-- Block tags and <br> become line breaks, inline tags (<strong>, <code>)
+-- vanish, so "Cursor version: <strong>3.13.10</strong>" stays one line.
+html_text AS (
+    SELECT
+        thread_id,
+        cooked,
+        '</?(?:p|br|li|ul|ol|div|pre|blockquote|h[1-6]|tr|td|th|table|hr)\b[^>]*>' AS block_tag
+    FROM posts
+    WHERE post_number = 1 AND cooked IS NOT NULL
+),
 
 first_posts AS (
     SELECT
         thread_id,
-        regexp_replace(regexp_replace(cooked, '<br\s*/?>', chr(10), 'g'), '<[^>]+>', chr(10), 'g') AS body,
-        regexp_replace(
+        regexp_replace(regexp_replace(cooked, block_tag, chr(10), 'g'), '<[^>]+>', '', 'g') AS body,
+        regexp_replace(regexp_replace(
             regexp_extract(cooked, '(?s)version-information[^>]*>.*?</h3>(.*?)(?:<h3|$)', 1),
-            '<[^>]+>', ' ', 'g')                     AS section
-    FROM posts
-    WHERE post_number = 1 AND cooked IS NOT NULL
+            block_tag, chr(10), 'g'), '<[^>]+>', '', 'g')                                  AS section
+    FROM html_text
+),
+
+candidates AS (
+    SELECT
+        thread_id,
+        nullif(regexp_extract(body,
+            '(?m)^[ \t]*Version:[ \t]*v?(\d+\.\d+)\.\d+[^\n]*\n(?:[^\n]*\n){0,3}?[^\n]*(?:VS ?Code|Commit:|Electron:)', 1), '')
+                                                                    AS about_dialog,
+        -- "Cursor 3.23.23", "Cursor Mac Desktop: 3.20.21", "cursor-server
+        -- 3.22.12", or a label and value on two lines ("Cursor Version" /
+        -- "3.24.18"). The words between are kept to reject "Cursor iOS
+        -- v1.4.0", "Cursor CLI: 3.0.9" and "Cursor on macOS 26.6.1"; a one-
+        -- or two-digit major keeps the CLI's date versions (2026.08.25) out,
+        -- and a 4+ digit build number in brackets marks the iOS app
+        -- ("Cursor v1.6.1 (39021)").
+        regexp_extract(section, '(?i)\bcursor\b([^\d]{0,25}?)v?(\d{1,2}\.\d+)\.\d+((?:\.\d+)?\s*\(\d{4,}\))?',
+                       ['gap', 'version', 'ios_build'])
+                                                                    AS named,
+        regexp_matches(section, '(?i)grok|sdk|\bcli\b|\bios\b|iphone|android|jetbrains|built:|release track')
+                                                                    AS names_other_product,
+        -- a build suffix only Cursor's desktop app prints
+        nullif(regexp_extract(section,
+            '(?i)\b(\d+\.\d+)\.\d+\s*\((?:user setup|system setup|universal|arm64|x64|commit\b[^)]*)\)', 1), '')
+                                                                    AS build_suffix,
+        -- a line opening "Version: 3.14.7", "Version 3.14.7", "IDE: 3.18.9"
+        nullif(regexp_extract(section, '(?im)^[ \t]*(?:IDE|Version)[ \t]*:?[ \t]*v?(\d{1,2}\.\d+)\.\d+', 1), '')
+                                                                    AS version_line
+    FROM first_posts
 )
 
 SELECT
     thread_id,
     coalesce(
-        nullif(regexp_extract(body,
-            '(?m)^[ \t]*Version:[ \t]*v?(\d+\.\d+)\.\d+[^\n]*\n(?:[^\n]*\n){0,3}?[^\n]*(?:VS ?Code|Commit:|Electron:)', 1), ''),
-        nullif(regexp_extract(section,
-            '(?i)\bCursor(?:\s+(?:IDE|desktop|app))?(?:\s+version)?\s*:?\s*v?(\d+\.\d+)\.\d+', 1), ''),
-        nullif(regexp_extract(section,
-            '(?i)\b(\d+\.\d+)\.\d+\s*\((?:user|system) setup\)', 1), '')
-    )                                                AS app_version
-FROM first_posts;
+        about_dialog,
+        CASE WHEN named.ios_build = '' AND NOT regexp_matches(named.gap,
+                      '(?i)ios|cli|sdk|agent|grok|android|jetbrains|mac|windows|darwin|linux|node|build|electron|chrom|code|extension')
+             THEN nullif(named.version, '') END,
+        build_suffix,
+        -- A bare "Version:" line only counts when the section is about nothing else.
+        CASE WHEN NOT names_other_product THEN version_line END
+    )                                                               AS app_version
+FROM candidates;
 
 
 CREATE OR REPLACE TABLE threads AS
