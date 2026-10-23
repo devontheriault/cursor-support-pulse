@@ -6,6 +6,7 @@ Runs sql/01..05 in DuckDB over the crawled JSON, then writes:
 
     .venv/bin/python build.py                       # raw/ -> the website
     .venv/bin/python build.py --raw sample --out-js /tmp/data.js
+    .venv/bin/python build.py --out /tmp/x --out-js /tmp/x/data.js   # dry run: copy labels.json (and doc_matches.json) to /tmp/x first
 
 Safe to run before out/doc_matches.json exists: doc status is then 'unknown'.
 """
@@ -57,6 +58,7 @@ def main() -> None:
 
     issues = top_issues(con)
     launches = rows(con, "SELECT tag, label, first_seen::VARCHAR AS first_seen, weeks FROM launches")
+    trend = trend_data(con)
     totals = rows(con, """
         SELECT
             count(*)                                   AS threads,
@@ -91,9 +93,9 @@ def main() -> None:
     ) + "\n")
 
     args.out_js.parent.mkdir(parents=True, exist_ok=True)
-    args.out_js.write_text(render_js(meta, header, issues, launches))
+    args.out_js.write_text(render_js(meta, header, issues, launches, trend))
 
-    print_summary(con, meta, header, totals, issues, launches, doc_matches_path, args.out_js)
+    print_summary(con, meta, header, totals, issues, launches, trend, doc_matches_path, args.out_js)
 
 
 def parse_args() -> argparse.Namespace:
@@ -160,6 +162,20 @@ def top_issues(con: duckdb.DuckDBPyConnection) -> list[dict]:
     """)
 
 
+def trend_data(con: duckdb.DuckDBPyConnection) -> dict:
+    """TREND in the contract's shape: the launch vs everything else, by week."""
+    launch = rows(con, "SELECT key, label, date::VARCHAR AS date, source, url FROM trend_launch")[0]
+    weeks = rows(con, "SELECT week::VARCHAR AS week, launch, rest FROM trend ORDER BY week")
+    return {
+        "weeks": [w["week"] for w in weeks],
+        "series": [
+            {"key": launch["key"], "label": launch["label"], "threads": [w["launch"] for w in weeks]},
+            {"key": "rest", "label": "Everything else", "threads": [w["rest"] for w in weeks]},
+        ],
+        "launch": launch,
+    }
+
+
 def rows(con: duckdb.DuckDBPyConnection, sql: str) -> list[dict]:
     cur = con.execute(sql)
     names = [c[0] for c in cur.description]
@@ -172,7 +188,7 @@ def r2(x: float | None) -> float | None:
 
 # --- data.js ---------------------------------------------------------------
 
-def render_js(meta: dict, header: dict, issues: list[dict], launches: list[dict]) -> str:
+def render_js(meta: dict, header: dict, issues: list[dict], launches: list[dict], trend: dict) -> str:
     issue_objs = [{
         "rank": i["rank"],
         "issue": i["issue"],
@@ -209,6 +225,15 @@ def render_js(meta: dict, header: dict, issues: list[dict], launches: list[dict]
         "export const LAUNCHES = [",
         *(f"  {js(o)}," for o in launch_objs),
         "];",
+        "// Weekly thread counts across the whole window, full Mon–Sun weeks only (ISO date of each Monday, UTC).",
+        "// series[0] = the launch (tagged grok-bot, or Grok Bot in the title); series[1] = every other in-scope thread.",
+        "export const TREND = {",
+        f"  weeks: {js(trend['weeks'])},",
+        "  series: [",
+        *(f"    {js(s)}," for s in trend["series"]),
+        "  ],",
+        f"  launch: {js(trend['launch'])},",
+        "};",
     ]
     return "\n".join(lines) + "\n"
 
@@ -236,7 +261,7 @@ def js(value) -> str:
 
 # --- stdout ----------------------------------------------------------------
 
-def print_summary(con, meta, header, totals, issues, launches, doc_matches_path, out_js) -> None:
+def print_summary(con, meta, header, totals, issues, launches, trend, doc_matches_path, out_js) -> None:
     funnel = rows(con, """
         SELECT
             count(*)                                                    AS topic_files,
@@ -275,11 +300,25 @@ def print_summary(con, meta, header, totals, issues, launches, doc_matches_path,
     for l in launches or [{"label": "(none)", "tag": "", "first_seen": "", "weeks": []}]:
         print(f"  {l['label']:<24} {l['tag']:<20} {l['first_seen']:<10}  {l['weeks']}")
 
+    print_trend(trend)
+
     unknown = sum(i["doc_status"] == "unknown" for i in issues)
     if unknown:
         hint = "rerun label.py docs (top 10 changed)" if doc_matches_path.exists() else "run label.py docs, then build.py"
         print(f"\n{unknown} top issues have doc status 'unknown': {hint}.")
     print(f"\nWrote {doc_matches_path.parent / 'top_issues.json'} and {out_js}")
+
+
+def print_trend(trend: dict) -> None:
+    launch, (ours, rest) = trend["launch"], trend["series"]
+    print(f"\nTrend: {launch['label']} (launched {launch['date']}, {launch['source']}: {launch['url']})")
+    print(f"  {'week':<10}  {launch['label'][:9]:>9}  {'rest':>5}  {'total':>5}  {'share':>5}")
+    for week, a, b in zip(trend["weeks"], ours["threads"], rest["threads"]):
+        total = a + b
+        share = f"{a / total:.0%}" if total else "-"
+        print(f"  {week:<10}  {a:>9}  {b:>5}  {total:>5}  {share:>5}")
+    a, b = sum(ours["threads"]), sum(rest["threads"])
+    print(f"  {'all':<10}  {a:>9}  {b:>5}  {a + b:>5}  {a / (a + b):>5.0%}" if a + b else "  (no full weeks)")
 
 
 if __name__ == "__main__":

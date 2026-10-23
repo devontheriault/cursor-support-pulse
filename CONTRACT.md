@@ -47,14 +47,15 @@ Dates are ISO strings; the page formats them ("Oct 12").
 ## Oct 23 changes
 - `data.js` gains `TREND` (card 3 is now "how one launch's load grew", replacing `LAUNCHES`, which stays exported for now):
 ```js
-// Weekly thread counts across the whole window, full Mon–Sun weeks only (ISO date of each Monday).
+// Weekly thread counts across the whole window, full Mon–Sun weeks only (ISO date of each Monday, UTC).
 export const TREND = {
   weeks: ['2026-07-27', '2026-08-03', ...],
   series: [
-    { key: 'grok-bot', label: 'Grok Bot', threads: [0, 0, 43, ...] },      // the launch being tracked
-    { key: 'rest', label: 'Everything else', threads: [180, 175, ...] },
+    { key: 'grok-bot', label: 'Grok Bot', threads: [0, 0, 37, ...] },      // the launch being tracked
+    { key: 'rest', label: 'Everything else', threads: [225, 231, ...] },
   ],
-  launch: { key: 'grok-bot', label: 'Grok Bot', date: '2026-08-11', source: 'Cursor changelog', url: 'https://cursor.com/changelog/...' },
+  launch: { key: 'grok-bot', label: 'Grok Bot', date: '2026-08-11', source: 'Cursor forum announcement', url: 'https://forum.cursor.com/t/168053' },
 };
 ```
+- TREND rules (`sql/05_launches.sql`, part 2): same scope as `threads`. A Grok Bot thread is tagged `grok-bot`, or untagged with "Grok Bot"/"Grokbot" in the title. The `grok` tag is the Grok *models* inside Cursor's agent, a different product: it counts as "Everything else". Weeks are Mon–Sun in UTC, from the first Monday on or after `window_from` to the last Sunday before `window_to`; partial weeks at either end are dropped. The launch date and source are set in the SQL (`trend_launch`): Cursor's changelog has no Grok Bot entry, so the source is the Announcements post (Aug 11, 2026, 19:34 UTC, "early beta").
 - Final runs of `build.py` (writing the site's `data.js`) and `label.py docs` are done by the coordinator once every part is finished; while working, write to temp paths (`--out-js /tmp/…`, `--out /tmp/…`).

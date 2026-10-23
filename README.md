@@ -10,7 +10,7 @@ An independent analysis of Cursor's public support forum ([forum.cursor.com](htt
 2. **Label.** Claude Haiku reads a sample of thread titles and proposes a short list of issues; a person reviews and edits the list. Haiku then assigns each thread one issue (or Other) and a sentiment from −1 to 1.
 3. **Score.** Each issue gets four measures: how many threads it has (frequency), how many people it reaches (distinct users plus likes: breadth), how many staff replies it takes (staff cost), and how negative it reads (negativity). Each is scaled 0 to 1 across issues, and the score is their average. Other is never ranked.
 4. **Docs.** For each top-10 issue: do staff link a cursor.com/docs page in at least 20% of its threads? If not, Haiku checks the docs sitemap for a matching page. Each issue ends up *linked*, *unlinked* (a page exists, staff rarely link it) or *missing* (no page).
-5. **Launches.** Forum tags that first appear partway through the window, and how their weekly thread counts fall off after launch.
+5. **Launch trend.** Weekly threads (full Mon–Sun weeks) for one launch, Grok Bot (launched Aug 11, 2026: tagged `grok-bot` or named in the title), against everything else, so its share of the forum can be followed week by week.
 
 All of the analysis is SQL (DuckDB, reading the crawled JSON directly) in [`sql/`](sql), run in order by `build.py`.
 
